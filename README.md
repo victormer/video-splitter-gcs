@@ -32,6 +32,21 @@ El input interno del worker es:
 
 `splittingSeconds` es la duración objetivo de cada clip. `overlappingSeconds` es el solape con el siguiente clip y debe ser menor que `splittingSeconds`. Si no se envía, se usa `0`.
 
+`startSeconds` y `endSeconds` son opcionales y representan el rango global del video original que se quiere procesar. Deben enviarse juntos. Si no se envían, el worker procesa el video completo como antes. También se aceptan `start` y `end` como alias de entrada.
+
+Ejemplo para procesar solo un fragmento del video:
+
+```json
+{
+  "uri": "gs://my-bucket/videos/source.mp4",
+  "clippingId": "clipping_123",
+  "splittingSeconds": 60,
+  "overlappingSeconds": 10,
+  "startSeconds": 120,
+  "endSeconds": 420
+}
+```
+
 ## Output
 
 ```json
@@ -65,10 +80,11 @@ gs://bucket/path/to/clipping/clipping_123/000000.mp4
 
 1. Descarga el objeto completo desde GCS a `/tmp`.
 2. Calcula la duración del video con `ffprobe`.
-3. Calcula rangos solapados. Por ejemplo, con `splittingSeconds=60` y `overlappingSeconds=10`: `0-60`, `50-110`, `100-160`, etc.
-4. Genera clips locales con IDs ordenables: `000000`, `000001`, etc.
-5. Sube cada clip a GCS.
-6. Devuelve las URIs y metadata `{ start, end, size }`.
+3. Si se envían `startSeconds` y `endSeconds`, limita el trabajo a ese fragmento global.
+4. Calcula rangos solapados sobre el video completo o sobre el fragmento. Por ejemplo, con `splittingSeconds=60`, `overlappingSeconds=10`, `startSeconds=120` y `endSeconds=420`: `120-180`, `170-230`, `220-280`, etc.
+5. Genera clips locales con IDs ordenables: `000000`, `000001`, etc.
+6. Sube cada clip a GCS.
+7. Devuelve las URIs y metadata `{ start, end, size }`, donde `start` y `end` están en segundos globales del video original.
 
 Los clips se reencodean con H.264/AAC para que la duración real de cada MP4 respete el rango calculado. Esto es más lento que copiar streams con `-c copy`, pero evita clips más largos por alineación a keyframes.
 

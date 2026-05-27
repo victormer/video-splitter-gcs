@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlparse
 from fastapi import FastAPI, HTTPException
 from google.cloud import storage
 from google.oauth2 import service_account
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 app = FastAPI(title="Video Chunker Worker")
@@ -20,10 +20,20 @@ SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class SplitRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     uri: str
     clippingId: Annotated[str, Field(min_length=1)]
     splittingSeconds: Annotated[int, Field(gt=0)]
     overlappingSeconds: Annotated[int, Field(ge=0)] = 0
+    startSeconds: Annotated[
+        int | None,
+        Field(ge=0, validation_alias=AliasChoices("startSeconds", "start")),
+    ] = None
+    endSeconds: Annotated[
+        int | None,
+        Field(gt=0, validation_alias=AliasChoices("endSeconds", "end")),
+    ] = None
 
 
 class ClipMetadata(BaseModel):
@@ -64,6 +74,30 @@ def validate_clipping_id(clipping_id: str) -> None:
 def validate_split_parameters(splitting_seconds: int, overlapping_seconds: int) -> None:
     if overlapping_seconds >= splitting_seconds:
         raise ValueError("overlappingSeconds must be lower than splittingSeconds")
+
+
+def validate_global_range(
+    start_seconds: int | None,
+    end_seconds: int | None,
+    total_duration: float,
+) -> tuple[int, int]:
+    if (start_seconds is None) != (end_seconds is None):
+        raise ValueError("startSeconds and endSeconds must be provided together")
+
+    total_duration_ceiled = math.ceil(total_duration)
+    if start_seconds is None or end_seconds is None:
+        return 0, total_duration_ceiled
+
+    if end_seconds <= start_seconds:
+        raise ValueError("endSeconds must be greater than startSeconds")
+
+    if start_seconds >= total_duration_ceiled:
+        raise ValueError("startSeconds must be lower than the video duration")
+
+    if end_seconds > total_duration_ceiled:
+        raise ValueError("endSeconds must be lower than or equal to the video duration")
+
+    return start_seconds, end_seconds
 
 
 def get_storage_client() -> storage.Client:
@@ -209,8 +243,13 @@ def process_split_request(request: SplitRequest) -> SplitResponse:
 
         try:
             bucket.blob(input_blob_name).download_to_filename(input_path)
-            clip_ranges = calculate_clip_ranges(
+            range_start, range_end = validate_global_range(
+                start_seconds=request.startSeconds,
+                end_seconds=request.endSeconds,
                 total_duration=probe_duration_seconds(input_path),
+            )
+            clip_ranges = calculate_clip_ranges(
+                total_duration=range_end - range_start,
                 splitting_seconds=request.splittingSeconds,
                 overlapping_seconds=request.overlappingSeconds,
             )
@@ -218,11 +257,13 @@ def process_split_request(request: SplitRequest) -> SplitResponse:
             for index, (start, end) in enumerate(clip_ranges):
                 clip_id = f"{index:06d}"
                 local_clip_path = os.path.join(output_dir, f"{clip_id}.mp4")
+                source_start = range_start + start
+                source_end = range_start + end
                 write_clip(
                     input_path=input_path,
                     output_path=local_clip_path,
-                    start=start,
-                    end=end,
+                    start=source_start,
+                    end=source_end,
                 )
 
                 output_name = output_blob_name(
@@ -239,8 +280,8 @@ def process_split_request(request: SplitRequest) -> SplitResponse:
                 result_uris.append(f"gs://{bucket_name}/{output_name}")
                 metadata.append(
                     ClipMetadata(
-                        start=start,
-                        end=end,
+                        start=source_start,
+                        end=source_end,
                         size=os.path.getsize(local_clip_path),
                     )
                 )
